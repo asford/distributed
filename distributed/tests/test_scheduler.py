@@ -731,7 +731,39 @@ def test_workers_to_close(cl, s, *workers):
     assert all(not s.processing[w] for w in wtc)
     assert len(wtc) == 1
 
-    
+@gen_cluster(client=True, ncores=[('127.0.0.1', 1)] * 4)
+def test_workers_to_close_grouped(cl, s, *workers):
+    waddresses = list(s.workers)
+    worker_groups = dict(a = waddresses[:2], b = waddresses[2:])
+
+    def gkey(waddress, winfo):
+        for gname, group in worker_groups.items():
+            if waddress in group:
+                return gname
+        raise ValueError("Did not assign group: %s" % waddress)
+
+    assert list(sorted(s.workers_to_close(group_key=gkey))) \
+            == list(sorted(waddresses))
+
+    # Assert that job in one worker blocks closure of group
+    cl.submit(slowadd, 1, .2, workers=worker_groups["a"][:1])
+    while len(s.rprocessing) < 1:
+        yield gen.sleep(0.001)
+
+    assert list(sorted(s.workers_to_close(group_key=gkey))) \
+            == list(sorted(worker_groups["b"]))
+
+    while len(s.rprocessing) > 0:
+        yield gen.sleep(0.001)
+
+    # Assert that *total* byte count in group determines group priority
+    av = yield cl.scatter("a" * 100, workers = worker_groups["a"][:1])
+    bv = yield cl.scatter("b" * 75, workers = worker_groups["b"][:1])
+    bv2 = yield cl.scatter("b" * 75, workers = worker_groups["b"][1:])
+
+    assert list(sorted(s.workers_to_close(group_key=gkey))) \
+             == list(sorted(worker_groups["a"]))
+
 @gen_cluster(client=True)
 def test_retire_workers_no_suspicious_tasks(c, s, a, b):
     future = c.submit(slowinc, 100, delay=0.5, workers=a.address, allow_other_workers=True)

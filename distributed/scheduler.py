@@ -1913,7 +1913,7 @@ class Scheduler(ServerNode):
                                'key-count': len(keys),
                                'branching-factor': branching_factor})
 
-    def workers_to_close(self, memory_ratio=2):
+    def workers_to_close(self, memory_ratio=2, group_key=None):
         """
         Find workers that we can close with low cost
 
@@ -1922,6 +1922,10 @@ class Scheduler(ServerNode):
         relatively little data relative to their peers.  If all workers are
         idle then we still maintain enough workers to have enough RAM to store
         our data, with a comfortable buffer.
+
+        If group_key is provided consider workers for closure on a per-group
+        basis. This may be used to, for example, consider workers for closure
+        on a per-host basis via `group_key=lambda w, winfo: winfo["hostname"]`.
 
         This is for use with systems like ``distributed.deploy.adaptive``.
 
@@ -1932,6 +1936,10 @@ class Scheduler(ServerNode):
             Defaults two 2, or that we want to have twice as much memory as we
             currently have data.
 
+        group_key: Callable(worker_address, worker_info)
+            An optional callable mapping a worker key and info entry to a worker group.
+            Workers considered for closure individually if None.
+
         Returns
         -------
         to_close: list of workers that are OK to close
@@ -1940,14 +1948,30 @@ class Scheduler(ServerNode):
             if all(self.processing.values()):
                 return []
 
-            limit_bytes = {w: self.worker_info[w]['memory_limit']
-                           for w in self.worker_info}
-            worker_bytes = self.worker_bytes
+            if group_key is None:
+                group_key = lambda wn, wi: wn
+
+            workers_by_group = defaultdict(dict)
+            for wname, winfo in self.worker_info.items():
+                w_group = group_key(wname, winfo)
+                workers_by_group[w_group][wname] = winfo
+
+            logger.info("workers_by_group: %s", workers_by_group)
+
+            limit_bytes = valmap(
+                lambda wg: sum(winfo["memory_limit"] for winfo in wg.values()),
+                workers_by_group
+            )
+            group_bytes = valmap(
+                lambda wg: sum(self.worker_bytes[wname] for wname in wg),
+                workers_by_group
+            )
 
             limit = sum(limit_bytes.values())
-            total = sum(worker_bytes.values())
-            idle = sorted([worker for worker in self.idle if not self.processing[worker]], 
-                          key=worker_bytes.get, reverse=True)
+            total = sum(group_bytes.values())
+            idle = sorted([group for group, worker_list in workers_by_group.items()
+                if not any(self.processing[worker] for worker in worker_list)],
+                key=group_bytes.get, reverse=True)
             to_close = []
 
             while idle:
@@ -1958,7 +1982,7 @@ class Scheduler(ServerNode):
                 else:
                     break
 
-            return to_close
+            return list(concat(workers_by_group[g] for g in to_close))
 
     @gen.coroutine
     def retire_workers(self, comm=None, workers=None, remove=True, close=False,
