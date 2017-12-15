@@ -1956,7 +1956,7 @@ class Scheduler(ServerNode):
                 w_group = group_key(wname, winfo)
                 workers_by_group[w_group][wname] = winfo
 
-            logger.info("workers_by_group: %s", workers_by_group)
+            logger.debug("workers_by_group: %s", workers_by_group)
 
             limit_bytes = valmap(
                 lambda wg: sum(winfo["memory_limit"] for winfo in wg.values()),
